@@ -21,3 +21,6 @@ To push the scores higher, by concatenating averaged word embeddings for differe
 (concatenate several averaged word embedding vectors for nouns, verbs, and adjectives so on) 
 instead of the whole sentence to the log-ratio feature vectors (NBSVM + POS wemb), NBSVM + POS wemb 
 outperforms NBSVM by 2-3%, and becomes a state-of-the-art model on most of sentiment benchmarks.
+
+####Results of NBSVM+POS###
+![Results of NBSVM+POS](../data/results.png?raw=true "Results of NBSVM+POS wemb against other models")
