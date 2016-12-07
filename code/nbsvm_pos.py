@@ -6,21 +6,58 @@ import pandas as pd
 import scipy.sparse as sp
 from scipy.sparse import csr_matrix
 from collections import Counter
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.grid_search import GridSearchCV
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, classification_report
 from nltk import pos_tag, word_tokenize
 from sklearn.datasets import dump_svmlight_file
 
 from utils import load_bin_vec, read_dataset, tokenize, compute_pos_wemb
 from data_preprocessing import add_lex_indicator
 
+#code is adapted from https://github.com/mesnilgr/nbsvm
+
 def usage():
     print '#####NBSVM + POS embedding model#####'
-    print 'python --train [path to train in json] --test [path to test in json] --we [path to word2vec] --ngram [e.g. 123]'
+    print 'python nbsvm_pos.py --train [path to train in json] --test [path to test in json] --we [path to word2vec] --ngram [e.g. 123]'
 
 
-def build_dict(df, grams, coln_t='text_lex', coln_y='y'):
+def fit_classifier_with_crossvalidation(X, y, basemod, cv, param_grid, scoring='f1'):
+    '''
+    Fit classifier using cross validation
+
+    ---Parameters---
+
+    X, y: training feature matrix, labels
+    basemodel: base model e.g. LogisticRegression()
+    param_grid: tunning parameters of basemodel
+    cv: cross validation folders
+
+    ---Returns---
+
+    best_model: best model return by cross validation
+
+    '''
+
+    # Find the best model within param_grid:
+    crossvalidator = GridSearchCV(basemod, param_grid, cv=cv, scoring=scoring)
+    crossvalidator.fit(X, y)
+
+    # Report some information:
+    print '\n-----------Grid scores-------------'
+    for params, mean_score, scores in crossvalidator.grid_scores_:
+        print("%0.3f (+/-%0.03f) for %r"
+              % (mean_score, scores.std() * 2, params))
+
+    print("Best params", crossvalidator.best_params_)
+    print("Best score: %0.03f" % crossvalidator.best_score_)
+    # Return the best model found:
+    best_model = crossvalidator.best_estimator_
+
+    return best_model
+
+
+def build_counters(df, grams, coln_t='text_lex', coln_y='y'):
     '''
     Build dictionary of tokens for each class in the training data set
 
@@ -31,57 +68,93 @@ def build_dict(df, grams, coln_t='text_lex', coln_y='y'):
 
     ---Returns---
 
-    pos_dic, neg_dic: Counter of all tokens among all data for specific class
+    counters: the token counter for each class
     '''
-
     grams = [int(i) for i in grams]
-    pos_dic = Counter()
-    neg_dic = Counter()
+    counters = {}
     count = 0
     for _, rev in df.iterrows():
-        y = rev[coln_y]
+        c = rev[coln_y]
         text = rev[coln_t]
-        if y == 1:
-            pos_dic.update(tokenize(text, grams))
-        else:
-            neg_dic.update(tokenize(text, grams))
-    return pos_dic, neg_dic
+        count += 1
+        # Select class counter
+        if c not in counters:
+            # we don't have a counter for this class
+            counters[c] = Counter()
+        counter = counters[c]
+
+        # update counter
+        counter.update(tokenize(text, grams))
+
+    print 'number of datum in train: ', count
+
+    return counters
 
 
-def compute_ratio(poscounts, negcounts, alpha=1):
+def compute_ratios(counters, alpha=1.0):
     '''
-    Calculates the log-count ratios for each token in the training data set
+    Calculates the log-count ratios of each token for each class in the training data set
 
     ---Parameters---
 
-    poscounts, negcounts: the token counter of two classes
+    counters: the token counter for each class
     alpha : smoothing parameter in count vectors (default 1)
 
     ---Returns---
 
     dic: a dictionary from token to tokens index
-    r: log-count ratio
+    ratios: log-count ratio
     v: total number of tokens
     '''
+    ratios = dict()
 
-    alltokens = list(set(poscounts.keys() + negcounts.keys()))
-    v = len(alltokens)  # the ngram vocabulary size
-    dic = dict((t, i) for i, t in enumerate(alltokens))
-    d = len(dic)
-    p, q = np.ones(d) * alpha , np.ones(d) * alpha
-    for t in alltokens:
-        p[dic[t]] += poscounts[t]
-        q[dic[t]] += negcounts[t]
+    # create a vocabulary - a list of all ngrams
+    all_ngrams = set()
+    for counter in counters.values():
+        all_ngrams.update(counter.keys())
+    all_ngrams = list(all_ngrams)
+    v = len(all_ngrams)  # the ngram vocabulary size
 
-    ratio = (abs(p).sum())/float(abs(q).sum())
-    q *= ratio
-    r = np.log(p/q)
-    print "In computing r --- number of tokens: ", str(v)
+    # a standard NLP dictionay (ngram -> index map) use to update the
+    # one-hot vector p
+    dic = dict((t, i) for i, t in enumerate(all_ngrams))
 
-    return dic, r, v
+    # sum ngram counts for all classes with alpha smoothing
+    # 2* because one gets subtracted when q_c is calculate by subtracting p_c
+    sum_counts = np.full(v, 2*alpha)
+    for c in counters:
+        counter = counters[c]
+        for t in all_ngrams:
+            sum_counts[dic[t]] += counter[t]
+
+    # calculate r_c for each class
+    for c in counters:
+        counter = counters[c]
+        p_c = np.full(v, alpha)     # initialize p_c with alpha (smoothing)
+
+        # add the ngram counts
+        for t in all_ngrams:
+            p_c[dic[t]] += counter[t]
+
+        # initialize q_c
+        q_c = sum_counts - p_c
+
+        # normalize (l1 norm)
+        p_c /= np.linalg.norm(p_c, ord=1)  # = p_c / sum(p_c)
+        q_c /= np.linalg.norm(q_c, ord=1)
+
+        # p_c = log(p/|p|)
+        p_c = np.log(p_c)
+        # q_c = log(not_p/|not_p|)
+        q_c = np.log(q_c)
+
+        # Subtract log(not_p/|not_p|
+        ratios[c] = p_c - q_c
+
+    return dic, ratios, v
 
 
-def process_files_ngram(df, dic, r, v, grams, coln_t='text_lex', coln_y='y'):
+def process_files_ngram(df, dic, r, v, grams, coln_t='text_lex'):
     '''
     Process dataframe file to get log-count ngrams ratio vectors
     (feature input for original nbsvm)
@@ -96,27 +169,38 @@ def process_files_ngram(df, dic, r, v, grams, coln_t='text_lex', coln_y='y'):
     ---Returns---
 
     log_counts: log-count ngrams ratio vectors
-    y: label vector
     '''
 
     grams = [int(i) for i in grams]
+    n_samples = df.shape[0]
+    classes = r.keys()
+    X = dict()
+    data = dict()
     indptr = [0] # it's a index for the head of doc in indices
     indices = [] # it's a token index list
-    data = [] # it's a token r list
-    n_samples = df.shape[0]
-    y = df[coln_y]
+    for c in classes:
+        data[c] = []
+
     for i, d in df.iterrows():
-        l = d[coln_t] # the text
-        ngrams = list(set(tokenize(l, grams))) # the tokens array
+        text = d[coln_t]
+        ngrams = tokenize(text, grams)
         for g in ngrams:
             if g in dic:
                 index = dic[g]
                 indices.append(index)
-                data.append(r[index])
+                for c in classes:
+                    data[c].append(r[c][index])
         indptr.append(len(indices))
-    log_counts = csr_matrix((data, indices, indptr), shape=(n_samples, v), dtype=np.float32) # the ngram part
 
-    return log_counts, y
+    for c in classes:
+        X[c] = csr_matrix((data[c], indices, indptr), shape=(n_samples, v), dtype=np.float32)
+
+    if len(classes) == 2:
+        log_counts = X[1]
+    else:
+        log_counts = sp.hstack(X.values(), format='csr')
+
+    return log_counts
 
 
 def process_files_wemb(df, wemb, coln='text'):
@@ -143,13 +227,15 @@ def process_files_wemb(df, wemb, coln='text'):
     return wemb_csr
 
 
-def model_run(basemodel, train, test, y_train, y_test):
+def model_run(basemod, param_grid, cv, X_train, X_test, y_train, y_test):
     '''
     Running model
 
     ---Parameters---
 
     basemodel: base model e.g. LogisticRegression()
+    param_grid: tunning parameters of basemodel
+    cv: cross validation folders
     train, test: training and testing feature sparse matrices
     y_train, y_test: gold labels for training/testing data set
     coln: column name for adding wembedding (eg: text)
@@ -160,10 +246,12 @@ def model_run(basemodel, train, test, y_train, y_test):
 
     '''
 
-    clf = basemodel
-    clf.fit(train, y_train)
-    y_pred = clf.predict(test)
-    f_score = accuracy_score(y_test, y_pred)
+    print('training classifiers by CV...')
+    model = fit_classifier_with_crossvalidation(X_train, y_train, basemod, cv, param_grid)
+
+    print('testing...')
+    y_pred = model.predict(X_test)
+    f_score = f1_score(y_test, y_pred)
 
     return f_score
 
@@ -183,11 +271,11 @@ def main(train, test, ngram, we):
     train_df[['text_lex', 'lex_ws']] = train_df.apply(add_lex_indicator, axis=1)
     test_df[['text_lex', 'lex_ws']] = test_df.apply(add_lex_indicator, axis=1)
 
-    print "using train to build pos and neg dic..."
-    pos_dic, neg_dic = build_dict(train_df, ngram)
+    print "using train to build token count dict for each class..."
+    counters = build_counters(train_df, ngram)
 
     print "computing log-count ratio r..."
-    dic, r, v = compute_ratio(pos_dic, neg_dic)
+    dic, r, v = compute_ratios(counters)
 
     print 'loading word embedding...'
     word2vec = load_bin_vec(we)
@@ -195,23 +283,26 @@ def main(train, test, ngram, we):
     print "building train and test features --- ngram part..."
     train_df.sort_index(inplace=True)
     test_df.sort_index(inplace=True)
-    X_train_ngram, y_train = process_files_ngram(train_df, dic, r, v, ngram)
-    X_test_ngram, y_test = process_files_ngram(test_df, dic, r, v, ngram)
+    y_train = train_df['y']
+    y_test = test_df['y']
+    X_train_ngram = process_files_ngram(train_df, dic, r, v, ngram)
+    X_test_ngram = process_files_ngram(test_df, dic, r, v, ngram)
 
     print "building train and test features --- pos embedding part..."
     X_train_embed = process_files_wemb(train_df, word2vec)
     X_test_embed = process_files_wemb(test_df, word2vec)
 
     print "combining log-count ratio and pos embedding features..."
-    train_f = sp.hstack((X_train_ngram, X_train_embed), format='csr')
-    test_f = sp.hstack((X_test_ngram, X_test_embed), format='csr')
+    X_train = sp.hstack((X_train_ngram, X_train_embed), format='csr')
+    X_test = sp.hstack((X_test_ngram, X_test_embed), format='csr')
 
     print "running model..."
-    basemodel = LogisticRegression()
-    f_score = model_run(basemodel, train_f, test_f, y_train, y_test)
-    print '##############f_score is: ', f_score
-
-    print 'model ended.'
+    basemod = LogisticRegression()
+    #tunning paramater step especially for multiclass classifier c and class_weight
+    cv = 10
+    param_grid = [{'C': [1, 0.1], 'class_weight': [{1: 1, -1: 1}, {1: 0.9, -1: 1}, {1: 1, -1: 0.9}]}]
+    f_score = model_run(basemod, param_grid, cv, X_train, X_test, y_train, y_test)
+    print 'f_score is: ', f_score
 
 
 if __name__ == "__main__":

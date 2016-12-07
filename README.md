@@ -1,3 +1,29 @@
+
+## Dwnloading the Software
+* **Using Git** : ```$ git clone https://taoyds@bitbucket.org/taoyds/nbsvm_pos.git```. This requires that you have a bitbucket account and have uploaded your public ssh key.
+
+## Compatibility and Dependencies
+Python 2.7 and 3.x
+sklearn
+scipy
+numpy
+pandas
+nltk
+
+## Running the Model
+```
+usage: python nbsvm_pos.py --train [path to train in json] --test [path to test in json] --we [path to word2vec] --ngram [e.g. 123]
+
+train/test file should in json with attributes: text: text string, y: labels
+```
+
+## Running Example
+
+```
+usage: python nbsvm_pos_multiclass.py --train ../data/mr_train_cv2.json --test ../data/mr_test_cv2.json --ngram 123 --we GoogleNews-vectors-negative300.bin
+
+```
+
 # NBSVM+POS wemb #
 
 NBSVM+POS word embedding (NBSVM+POS wemb) model outperforms most recent published sentiment models 
@@ -23,4 +49,4 @@ instead of the whole sentence to the log-ratio feature vectors (NBSVM + POS wemb
 outperforms NBSVM by 2-3%, and becomes a state-of-the-art model on most of sentiment benchmarks.
 
 ####Results of NBSVM+POS###
-![Results of NBSVM+POS](../data/results.png?raw=true "Results of NBSVM+POS wemb against other models")
+![Results of NBSVM+POS](raw/master/data/results.png?raw=true "Results of NBSVM+POS wemb against other models")
