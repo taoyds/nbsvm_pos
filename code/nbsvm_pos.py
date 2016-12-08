@@ -22,7 +22,7 @@ def usage():
     print 'python nbsvm_pos.py --train [path to train in json] --test [path to test in json] --we [path to word2vec] --ngram [e.g. 123]'
 
 
-def fit_classifier_with_crossvalidation(X, y, basemod, cv, param_grid, scoring='f1'):
+def fit_classifier_with_crossvalidation(X, y, basemod, cv, param_grid, scoring='f1_micro'):
     '''
     Fit classifier using cross validation
 
